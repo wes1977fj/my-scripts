@@ -4,6 +4,8 @@
 CONTAINER_NAME="metube"
 BASE_DIR="/docker/$CONTAINER_NAME"
 PORT="5009"
+# Detect the primary user (ID 1000 is usually 'dietpi' or the first user)
+SAMBA_USER=$(id -un 1000 2>/dev/null || echo "$USER")
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -12,18 +14,26 @@ NC='\033[0m' # No Color
 
 echo "Starting deployment for $CONTAINER_NAME..."
 
-# 1. Dependency Check (Supports V1 and V2)
+# 1. Dependency Check
 check_dependencies() {
-    DOCKER_CMD=""
     if ! command -v docker &> /dev/null; then
-        echo "Docker not found. Installing via DietPi-Software..."
-        sudo dietpi-software install 162 134
+        if command -v dietpi-software &> /dev/null; then
+            echo "DietPi detected. Installing Docker via dietpi-software..."
+            sudo dietpi-software install 162 134
+        else
+            echo "Installing Docker via official script..."
+            curl -fsSL https://get.docker.com | sh
+            sudo usermod -aG docker "$USER"
+        fi
     fi
 
-    if command -v docker-compose &> /dev/null; then
+    if docker compose version &> /dev/null; then
+        DOCKER_CMD="docker compose"
+    elif command -v docker-compose &> /dev/null; then
         DOCKER_CMD="docker-compose"
     else
-        DOCKER_CMD="docker compose"
+        echo -e "${RED}Docker Compose not found. Please install it first.${NC}"
+        exit 1
     fi
 }
 
@@ -38,7 +48,12 @@ setup_folders() {
 
 # 3. Network Selection
 setup_network() {
-    read -p "Is this connected to default Docker network? (y/n): " net_choice
+    if [ -t 0 ]; then
+        read -p "Is this connected to default Docker network? (y/n): " net_choice
+    else
+        net_choice="y"
+    fi
+
     if [[ $net_choice == [nN] ]]; then
         echo "Available networks:"
         mapfile -t networks < <(docker network ls --format "{{.Name}}")
@@ -76,8 +91,8 @@ services:
     networks:
       - app_net
     environment:
-      - UID=1000
-      - GID=1000
+      - UID=$(id -u)
+      - GID=$(id -g)
       - UMASK=022
       - DOWNLOAD_DIR=/downloads
       - OUTPUT_TEMPLATE=%(title)s.%(ext)s
@@ -89,15 +104,18 @@ networks:
 EOF
 }
 
-# 5. Smart Samba Share Function (Location-Based)
+# 5. Samba Share Function
 setup_samba_share() {
     if command -v smbd &> /dev/null; then
-        echo "Samba detected. Checking existing shares..."
-        read -p "Would you like to ensure the /media folder is shared via Samba? (y/n): " samba_choice
+        if [ -t 0 ]; then
+            read -p "Would you like to ensure /media is shared via Samba? (y/n): " samba_choice
+        else
+            samba_choice="n"
+        fi
+
         if [[ $samba_choice == [yY] ]]; then
-            # This regex looks for an exact 'path = /media' line regardless of the title
             if grep -E "^[[:space:]]*path[[:space:]]*=[[:space:]]*/media[[:space:]]*$" /etc/samba/smb.conf > /dev/null; then
-                echo -e "${GREEN}The location /media is already shared in your Samba config. Skipping duplicate entry.${NC}"
+                echo -e "${GREEN}The location /media is already shared.${NC}"
             else
                 echo "Adding /media to Samba configuration..."
                 cat <<EOF | sudo tee -a /etc/samba/smb.conf > /dev/null
@@ -110,14 +128,12 @@ setup_samba_share() {
    guest ok = yes
    create mask = 0644
    directory mask = 0755
-   force user = dietpi
+   force user = $SAMBA_USER
 EOF
                 sudo systemctl restart smbd
-                echo -e "${GREEN}Samba share [Media] added and service restarted.${NC}"
+                echo -e "${GREEN}Samba share [Media] added.${NC}"
             fi
         fi
-    else
-        echo "Samba is not installed. Skipping Samba setup."
     fi
 }
 
@@ -128,13 +144,13 @@ setup_network
 create_compose
 
 echo "Building container..."
-cd "$BASE_DIR" || exit
+# Navigate to the directory containing the compose file
+cd "$BASE_DIR" || { echo "Directory $BASE_DIR not found"; exit 1; }
+
 if sudo $DOCKER_CMD up -d; then
     IP_ADDR=$(hostname -I | awk '{print $1}')
     echo -e "${GREEN}success${NC}"
     echo "Done! Access MeTube at http://$IP_ADDR:$PORT"
-
-    # Run the Samba check
     setup_samba_share
 else
     echo -e "${RED}failed${NC}"
