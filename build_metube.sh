@@ -158,6 +158,9 @@ EOF
 }
 
 # --- Execution Sequence ---
+# Store the absolute path of the script BEFORE we start changing directories
+FULL_SCRIPT_PATH=$(readlink -f "$0")
+
 check_dependencies
 setup_folders
 setup_network
@@ -172,9 +175,11 @@ if sudo $DOCKER_CMD up -d; then
     echo "Done! Access MeTube at http://$IP_ADDR:$PORT"
     setup_samba_share
     
-    # --- Cleanup Section ---
+    # --- Final Cleanup ---
     echo "Cleaning up installer script..."
-    rm -- "$0"
+    if [ -f "$FULL_SCRIPT_PATH" ]; then
+        rm -f "$FULL_SCRIPT_PATH"
+    fi
 else
     echo -e "${RED}failed${NC}"
     exit 1
