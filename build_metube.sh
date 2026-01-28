@@ -8,6 +8,7 @@ set -e
 CONTAINER_NAME="metube"
 BASE_DIR="/docker/$CONTAINER_NAME"
 PORT="5009"
+DEFAULT_NETWORK="bridge" # The default network to use if the user declines a custom one.
 
 # --- Colors for output ---
 GREEN='\033[0;32m'
@@ -23,13 +24,12 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # 2. Terminal Check
-# Ensure we have a terminal to ask questions, even if stdin is piped.
 if ! [ -t 0 ] && ! [ -r /dev/tty ]; then
     echo -e "${RED}Error: This script is interactive but has no terminal to connect to.${NC}" >&2
     exit 1
 fi
 
-# 3. User Detection (for file permissions)
+# 3. User Detection
 if [[ -n "$SUDO_USER" ]]; then
     RUN_USER="$SUDO_USER"
     RUN_UID=$(id -u "$SUDO_USER")
@@ -76,8 +76,8 @@ setup_folders() {
 }
 
 setup_network() {
-    # By adding '< /dev/tty', we force 'read' to listen to the keyboard.
-    read -p "Use a custom Docker network instead of the default 'bridge'? (y/n): " net_choice < /dev/tty
+    # UPDATED to be more informative by using the $DEFAULT_NETWORK variable.
+    read -p "The default Docker network is '$DEFAULT_NETWORK'. Would you like to use a different one? (y/n): " net_choice < /dev/tty
 
     if [[ $net_choice == [yY] ]]; then
         echo "Available networks:"
@@ -97,7 +97,7 @@ setup_network() {
             SELECTED_NET="${networks[$selection]}"
         fi
     else
-        SELECTED_NET="bridge"
+        SELECTED_NET="$DEFAULT_NETWORK"
     fi
     echo "Using network: $SELECTED_NET"
 }
