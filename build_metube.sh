@@ -4,6 +4,7 @@
 CONTAINER_NAME="metube"
 BASE_DIR="/docker/$CONTAINER_NAME"
 PORT="5009"
+# Detect the primary user (ID 1000 is usually 'dietpi' or the first user)
 SAMBA_USER=$(id -un 1000 2>/dev/null || echo "$USER")
 
 # Colors for output
@@ -77,27 +78,7 @@ setup_network() {
 # 4. Create Docker Compose File
 create_compose() {
     echo "Writing docker-compose.yml..."
-    # If using default bridge, we must NOT define networks: or app_net:
-    if [ "$SELECTED_NET" == "bridge" ]; then
-        cat <<EOF | sudo tee "$BASE_DIR/docker-compose.yml" > /dev/null
-services:
-  $CONTAINER_NAME:
-    image: ghcr.io/alexta69/metube:latest
-    container_name: $CONTAINER_NAME
-    restart: unless-stopped
-    ports:
-      - "$PORT:8081"
-    volumes:
-      - /media/ytdl:/downloads
-    environment:
-      - UID=$(id -u)
-      - GID=$(id -g)
-      - UMASK=022
-      - DOWNLOAD_DIR=/downloads
-      - OUTPUT_TEMPLATE=%(title)s.%(ext)s
-EOF
-    else
-        cat <<EOF | sudo tee "$BASE_DIR/docker-compose.yml" > /dev/null
+    cat <<EOF | sudo tee "$BASE_DIR/docker-compose.yml" > /dev/null
 services:
   $CONTAINER_NAME:
     image: ghcr.io/alexta69/metube:latest
@@ -121,17 +102,9 @@ networks:
     external: true
     name: $SELECTED_NET
 EOF
-    fi
 }
 
-# 5. Cleanup Old Containers
-cleanup_old() {
-    echo "Cleaning up existing $CONTAINER_NAME resources..."
-    # Stop and remove container if it exists
-    sudo docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1
-}
-
-# 6. Samba Share Function
+# 5. Samba Share Function
 setup_samba_share() {
     if command -v smbd &> /dev/null; then
         if [ -t 0 ]; then
@@ -168,14 +141,11 @@ EOF
 check_dependencies
 setup_folders
 setup_network
-cleanup_old  # This now uses 'docker rm -f' for a cleaner slate
 create_compose
 
 echo "Building container..."
+# Navigate to the directory containing the compose file
 cd "$BASE_DIR" || { echo "Directory $BASE_DIR not found"; exit 1; }
-
-# Try to pull latest image first to ensure success
-sudo docker pull ghcr.io/alexta69/metube:latest
 
 if sudo $DOCKER_CMD up -d; then
     IP_ADDR=$(hostname -I | awk '{print $1}')
