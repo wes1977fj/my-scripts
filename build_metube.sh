@@ -26,11 +26,26 @@ if [[ -n "$SUDO_USER" ]]; then RUN_USER="$SUDO_USER"; else RUN_USER=$(id -un 100
 RUN_UID=$(id -u "$RUN_USER" 2>/dev/null || echo "1000"); RUN_GID=$(id -g "$RUN_USER" 2>/dev/null || echo "1000")
 echo "Running installer for user: $RUN_USER (UID: $RUN_UID, GID: $RUN_GID)"
 
-# --- Core Functions (Compacted for Brevity) ---
+# --- Core Functions ---
 check_dependencies() { echo "Checking dependencies..."; if ! command -v docker &> /dev/null; then if command -v dietpi-software &> /dev/null; then dietpi-software install 162 134; else curl -fsSL https://get.docker.com | sh; usermod -aG docker "$RUN_USER"; fi; fi; if docker compose version &> /dev/null; then DOCKER_CMD="docker compose"; elif command -v docker-compose &> /dev/null; then DOCKER_CMD="docker-compose"; else echo -e "${RED}Docker Compose not found.${NC}"; exit 1; fi; }
 setup_folders() { echo "Creating directories..."; mkdir -p "/docker/$CONTAINER_NAME"; for host_path in "${!VOLUME_MAPPINGS[@]}"; do mkdir -p "$host_path"; done; chown -R "$RUN_USER":"$RUN_USER" "/docker/$CONTAINER_NAME" "${!VOLUME_MAPPINGS[@]}"; }
 setup_network() { read -p "The default Docker network is '$DEFAULT_NETWORK'. Use a different one? (y/n): " nc < /dev/tty; if [[ $nc == [yY] ]]; then echo "Available networks:"; mapfile -t nets < <(docker network ls --format "{{.Name}}"); for i in "${!nets[@]}"; do echo "$i) ${nets[$i]}"; done; echo "c) Create new"; read -p "Select a number or 'c': " sel < /dev/tty; if [[ $sel == [cC] ]]; then read -p "New network name: " new_net < /dev/tty; docker network create "$new_net"; SELECTED_NET="$new_net"; else SELECTED_NET="${nets[$sel]}"; fi; else SELECTED_NET="$DEFAULT_NETWORK"; fi; echo "Using network: $SELECTED_NET"; }
-create_compose() { echo "Writing docker-compose.yml..."; local net_cfg="" svc_net_cfg="" vol_blk=""; if [[ "$SELECTED_NET" != "bridge" ]]; then net_cfg="\nnetworks:\n  app_net:\n    external: true\n    name: $SELECTED_NET"; svc_net_cfg="\n    networks:\n      - app_net"; fi; for host_path in "${!VOLUME_MAPPINGS[@]}"; do vol_blk+=$(printf "\n      - %s:%s" "$host_path" "${VOLUME_MAPPINGS[$host_path]}"); done; tee "/docker/$CONTAINER_NAME/docker-compose.yml" > /dev/null <<EOF
+
+create_compose() {
+    echo "Writing docker-compose.yml...";
+    local net_cfg="" svc_net_cfg="" vol_blk=""
+
+    # Build the dynamic blocks first
+    if [[ "$SELECTED_NET" != "bridge" ]]; then
+        net_cfg=$(printf "\nnetworks:\n  app_net:\n    external: true\n    name: $SELECTED_NET")
+        svc_net_cfg=$(printf "\n    networks:\n      - app_net")
+    fi
+    for host_path in "${!VOLUME_MAPPINGS[@]}"; do
+        vol_blk+=$(printf "\n      - %s:%s" "$host_path" "${VOLUME_MAPPINGS[$host_path]}")
+    done
+
+    # Now generate the file with each block on a new line
+    tee "/docker/$CONTAINER_NAME/docker-compose.yml" > /dev/null <<EOF
 services:
   $CONTAINER_NAME:
     image: $DOCKER_IMAGE
@@ -39,18 +54,18 @@ services:
     ports:
       - "$DEFAULT_PORT:8081"
     volumes:${vol_blk}
-$svc_net_cfg
+${svc_net_cfg}
     environment:
       - UID=$RUN_UID
       - GID=$RUN_GID
       - UMASK=022
       - DOWNLOAD_DIR=/downloads
       - OUTPUT_TEMPLATE=%(title)s.%(ext)s
-$net_cfg
+${net_cfg}
 EOF
-chown "$RUN_USER":"$RUN_USER" "/docker/$CONTAINER_NAME/docker-compose.yml"; }
+    chown "$RUN_USER":"$RUN_USER" "/docker/$CONTAINER_NAME/docker-compose.yml"
+}
 
-# --- setup_samba_share function with DYNAMIC list generation ---
 setup_samba_share() {
     if ! command -v smbd &> /dev/null; then echo "Samba not installed. Skipping."; return; fi
     local samba_choice; read -p "Configure Samba shares? (y/n): " samba_choice < /dev/tty; if [[ $samba_choice != [yY] ]]; then return; fi
