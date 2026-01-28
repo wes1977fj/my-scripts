@@ -4,6 +4,7 @@
 CONTAINER_NAME="metube"
 BASE_DIR="/docker/$CONTAINER_NAME"
 PORT="5009"
+# Detect the primary user (ID 1000 is usually 'dietpi' or the first user)
 SAMBA_USER=$(id -un 1000 2>/dev/null || echo "$USER")
 
 # Colors for output
@@ -103,16 +104,7 @@ networks:
 EOF
 }
 
-# 5. Cleanup Old Containers
-cleanup_old() {
-    if [ "$(docker ps -aq -f name=^/${CONTAINER_NAME}$)" ]; then
-        echo "Cleaning up existing $CONTAINER_NAME container..."
-        docker stop "$CONTAINER_NAME" > /dev/null 2>&1
-        docker rm "$CONTAINER_NAME" > /dev/null 2>&1
-    fi
-}
-
-# 6. Samba Share Function
+# 5. Samba Share Function
 setup_samba_share() {
     if command -v smbd &> /dev/null; then
         if [ -t 0 ]; then
@@ -149,10 +141,10 @@ EOF
 check_dependencies
 setup_folders
 setup_network
-cleanup_old
 create_compose
 
 echo "Building container..."
+# Navigate to the directory containing the compose file
 cd "$BASE_DIR" || { echo "Directory $BASE_DIR not found"; exit 1; }
 
 if sudo $DOCKER_CMD up -d; then
