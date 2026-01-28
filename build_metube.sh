@@ -1,28 +1,59 @@
 #!/bin/bash
+# A fully interactive installer, designed to work via curl.
+
+# Exit immediately if a command exits with a non-zero status.
+set -e
 
 # --- Configuration ---
 CONTAINER_NAME="metube"
 BASE_DIR="/docker/$CONTAINER_NAME"
 PORT="5009"
-SAMBA_USER=$(id -un 1000 2>/dev/null || echo "$USER")
 
-# Colors for output
+# --- Colors for output ---
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-echo "Starting deployment for $CONTAINER_NAME..."
+# --- Pre-flight Checks ---
 
-# 1. Dependency Check
+# 1. Root Check
+if [[ $EUID -ne 0 ]]; then
+   echo -e "${RED}This script must be run as root. Please use sudo.${NC}"
+   exit 1
+fi
+
+# 2. Terminal Check
+# Ensure we have a terminal to ask questions, even if stdin is piped.
+if ! [ -t 0 ] && ! [ -r /dev/tty ]; then
+    echo -e "${RED}Error: This script is interactive but has no terminal to connect to.${NC}" >&2
+    exit 1
+fi
+
+# 3. User Detection (for file permissions)
+if [[ -n "$SUDO_USER" ]]; then
+    RUN_USER="$SUDO_USER"
+    RUN_UID=$(id -u "$SUDO_USER")
+    RUN_GID=$(id -g "$SUDO_USER")
+else
+    RUN_USER=$(id -un 1000 2>/dev/null || echo "user")
+    RUN_UID=$(id -u "$RUN_USER" 2>/dev/null || echo "1000")
+    RUN_GID=$(id -g "$RUN_USER" 2>/dev/null || echo "1000")
+fi
+echo "Running installer on behalf of user: $RUN_USER (UID: $RUN_UID, GID: $RUN_GID)"
+
+
+# --- Core Functions ---
+
 check_dependencies() {
+    echo "Checking dependencies..."
     if ! command -v docker &> /dev/null; then
         if command -v dietpi-software &> /dev/null; then
-            echo "DietPi detected. Installing Docker via dietpi-software..."
-            sudo dietpi-software install 162 134
+            echo "DietPi detected. Installing Docker and Docker Compose..."
+            dietpi-software install 162 134
         else
             echo "Installing Docker via official script..."
             curl -fsSL https://get.docker.com | sh
-            sudo usermod -aG docker "$USER"
+            usermod -aG docker "$RUN_USER"
         fi
     fi
 
@@ -31,29 +62,24 @@ check_dependencies() {
     elif command -v docker-compose &> /dev/null; then
         DOCKER_CMD="docker-compose"
     else
-        echo -e "${RED}Docker Compose not found. Please install it first.${NC}"
+        echo -e "${RED}Docker Compose not found. Please install it.${NC}"
         exit 1
     fi
 }
 
-# 2. Setup Folders
 setup_folders() {
     echo "Creating directories..."
-    sudo mkdir -p "$BASE_DIR"
-    sudo mkdir -p /media/ytdl
-    sudo chmod -R 755 "$BASE_DIR"
-    sudo chmod 755 /media
+    mkdir -p "$BASE_DIR"
+    mkdir -p /media/ytdl
+    chown -R "$RUN_USER":"$RUN_USER" "$BASE_DIR" /media
+    chmod -R 755 /media
 }
 
-# 3. Network Selection
 setup_network() {
-    if [ -t 0 ]; then
-        read -p "Is this connected to default Docker network? (y/n): " net_choice
-    else
-        net_choice="y"
-    fi
+    # By adding '< /dev/tty', we force 'read' to listen to the keyboard.
+    read -p "Use a custom Docker network instead of the default 'bridge'? (y/n): " net_choice < /dev/tty
 
-    if [[ $net_choice == [nN] ]]; then
+    if [[ $net_choice == [yY] ]]; then
         echo "Available networks:"
         mapfile -t networks < <(docker network ls --format "{{.Name}}")
         for i in "${!networks[@]}"; do
@@ -61,9 +87,10 @@ setup_network() {
         done
         echo "c) Create a new network"
 
-        read -p "Select a number or 'c': " selection
+        read -p "Select a number or 'c': " selection < /dev/tty
+
         if [[ $selection == "c" ]]; then
-            read -p "Enter new network name: " new_net
+            read -p "Enter new network name: " new_net < /dev/tty
             docker network create "$new_net"
             SELECTED_NET="$new_net"
         else
@@ -72,73 +99,61 @@ setup_network() {
     else
         SELECTED_NET="bridge"
     fi
+    echo "Using network: $SELECTED_NET"
 }
 
-# 4. Create Docker Compose File
 create_compose() {
     echo "Writing docker-compose.yml..."
-    # If using default bridge, we must NOT define networks: or app_net:
-    if [ "$SELECTED_NET" == "bridge" ]; then
-        cat <<EOF | sudo tee "$BASE_DIR/docker-compose.yml" > /dev/null
-services:
-  $CONTAINER_NAME:
-    image: ghcr.io/alexta69/metube:latest
-    container_name: $CONTAINER_NAME
-    restart: unless-stopped
-    ports:
-      - "$PORT:8081"
-    volumes:
-      - /media/ytdl:/downloads
-    environment:
-      - UID=$(id -u)
-      - GID=$(id -g)
-      - UMASK=022
-      - DOWNLOAD_DIR=/downloads
-      - OUTPUT_TEMPLATE=%(title)s.%(ext)s
-EOF
-    else
-        cat <<EOF | sudo tee "$BASE_DIR/docker-compose.yml" > /dev/null
-services:
-  $CONTAINER_NAME:
-    image: ghcr.io/alexta69/metube:latest
-    container_name: $CONTAINER_NAME
-    restart: unless-stopped
-    ports:
-      - "$PORT:8081"
-    volumes:
-      - /media/ytdl:/downloads
-    networks:
-      - app_net
-    environment:
-      - UID=$(id -u)
-      - GID=$(id -g)
-      - UMASK=022
-      - DOWNLOAD_DIR=/downloads
-      - OUTPUT_TEMPLATE=%(title)s.%(ext)s
+    local network_config=""
+    local service_network_config=""
 
+    if [[ "$SELECTED_NET" != "bridge" ]]; then
+        network_config="
 networks:
   app_net:
     external: true
-    name: $SELECTED_NET
-EOF
+    name: $SELECTED_NET"
+        service_network_config="
+    networks:
+      - app_net"
     fi
+
+    tee "$BASE_DIR/docker-compose.yml" > /dev/null <<EOF
+services:
+  $CONTAINER_NAME:
+    image: ghcr.io/alexta69/metube:latest
+    container_name: $CONTAINER_NAME
+    restart: unless-stopped
+    ports:
+      - "$PORT:8081"
+    volumes:
+      - /media/ytdl:/downloads
+$service_network_config
+    environment:
+      - UID=$RUN_UID
+      - GID=$RUN_GID
+      - UMASK=022
+      - DOWNLOAD_DIR=/downloads
+      - OUTPUT_TEMPLATE=%(title)s.%(ext)s
+$network_config
+EOF
+    chown "$RUN_USER":"$RUN_USER" "$BASE_DIR/docker-compose.yml"
 }
 
-# 5. Samba Share Function
 setup_samba_share() {
-    if command -v smbd &> /dev/null; then
-        if [ -t 0 ]; then
-            read -p "Would you like to ensure /media is shared via Samba? (y/n): " samba_choice
-        else
-            samba_choice="n"
-        fi
+    if ! command -v smbd &> /dev/null; then
+        echo "Samba (smbd) not installed. Skipping this step."
+        return
+    fi
 
-        if [[ $samba_choice == [yY] ]]; then
-            if grep -E "^[[:space:]]*path[[:space:]]*=[[:space:]]*/media[[:space:]]*$" /etc/samba/smb.conf > /dev/null; then
-                echo -e "${GREEN}The location /media is already shared.${NC}"
-            else
-                echo "Adding /media to Samba configuration..."
-                cat <<EOF | sudo tee -a /etc/samba/smb.conf > /dev/null
+    read -p "Would you like to ensure /media is shared via Samba? (y/n): " samba_choice < /dev/tty
+
+    if [[ $samba_choice == [yY] ]]; then
+        if grep -qE "^\s*path\s*=\s*/media\s*$" /etc/samba/smb.conf; then
+            echo -e "${GREEN}The location /media is already shared.${NC}"
+        else
+            echo "Adding /media to Samba configuration..."
+            tee -a /etc/samba/smb.conf > /dev/null <<EOF
 
 [Media]
    comment = Media Folder
@@ -148,39 +163,30 @@ setup_samba_share() {
    guest ok = yes
    create mask = 0644
    directory mask = 0755
-   force user = $SAMBA_USER
+   force user = $RUN_USER
 EOF
-                sudo systemctl restart smbd
-                echo -e "${GREEN}Samba share [Media] added.${NC}"
-            fi
+            echo "Restarting Samba service..."
+            systemctl restart smbd
+            echo -e "${GREEN}Samba share [Media] added.${NC}"
         fi
     fi
 }
 
 # --- Execution Sequence ---
-# Store the absolute path of the script BEFORE we start changing directories
-FULL_SCRIPT_PATH=$(readlink -f "$0")
-
+echo "Starting MeTube interactive deployment..."
 check_dependencies
 setup_folders
 setup_network
 create_compose
 
-echo "Building container..."
-cd "$BASE_DIR" || { echo "Directory $BASE_DIR not found"; exit 1; }
-
-if sudo $DOCKER_CMD up -d; then
+echo "Building container from $BASE_DIR..."
+if $DOCKER_CMD -f "$BASE_DIR/docker-compose.yml" up -d; then
     IP_ADDR=$(hostname -I | awk '{print $1}')
-    echo -e "${GREEN}success${NC}"
-    echo "Done! Access MeTube at http://$IP_ADDR:$PORT"
+    echo -e "${GREEN}Deployment successful!${NC}"
+    echo "Access MeTube at http://$IP_ADDR:$PORT"
     setup_samba_share
-    
-    # --- Final Cleanup ---
-    echo "Cleaning up installer script..."
-    if [ -f "$FULL_SCRIPT_PATH" ]; then
-        rm -f "$FULL_SCRIPT_PATH"
-    fi
+    echo -e "${GREEN}Done!${NC}"
 else
-    echo -e "${RED}failed${NC}"
+    echo -e "${RED}Docker Compose deployment failed.${NC}"
     exit 1
 fi
