@@ -1,32 +1,30 @@
 #!/bin/bash
-# MeTube TUI Installer - Themed & Verified Version
+# MeTube TUI Installer - Blue High-Contrast Selection
 set -e
 
-# --- Custom Whiptail Theme (Blue/Cyan) ---
+# --- High-Visibility Blue Theme ---
+# actbutton = The one you ARE on (now Yellow on Blue)
+# button = The ones you ARE NOT on (now White on Gray)
 export NEWT_COLORS='
   root=,blue
   window=,lightgray
   border=blue,lightgray
   shadow=,black
-  button=white,blue
-  actbutton=white,cyan
-  compactbutton=white,blue
+  button=white,gray
+  actbutton=yellow,blue
+  compactbutton=yellow,blue
   title=blue,lightgray
   textbox=black,lightgray
   acttextbox=lightgray,black
   entry=black,white
   disentry=gray,lightgray
   checkbox=black,lightgray
-  actcheckbox=lightgray,black
+  actcheckbox=yellow,blue
   listbox=black,lightgray
-  actlistbox=lightgray,black
+  actlistbox=yellow,blue
 '
 
-# --- System Checks ---
-if ((BASH_VERSINFO[0] < 4)); then
-    echo -e "\033[0;31mError: Bash 4.0+ required.\033[0m" >&2; exit 1
-fi
-
+# --- Initial Checks ---
 if [[ $EUID -ne 0 ]]; then
     echo -e "\033[0;31mPlease run as root.\033[0m"; exit 1
 fi
@@ -58,11 +56,10 @@ get_config() {
     USER_PORT=$(whiptail --title "MeTube Config" --inputbox "Enter Port for MeTube Web UI:" 10 60 "5009" 3>&1 1>&2 2>&3)
     HOST_DL_PATH=$(whiptail --title "Storage Config" --inputbox "Host path for downloads:" 10 60 "/media/ytdl" 3>&1 1>&2 2>&3)
     
-    # Network Choice
     mapfile -t nets < <(docker network ls --format "{{.Name}}")
     NET_OPTIONS=()
     for net in "${nets[@]}"; do NET_OPTIONS+=("$net" "Existing Network"); done
-    SELECTED_NET=$(whiptail --title "Networking" --menu "Select Docker Network:" 15 60 5 "${NET_OPTIONS[@]}" 3>&1 1>&2 2>&3)
+    SELECTED_NET=$(whiptail --title "Networking" --menu "Select Network (Tab to move, Space/Enter to select):" 15 60 5 "${NET_OPTIONS[@]}" 3>&1 1>&2 2>&3)
 }
 
 # --- Deployment ---
@@ -93,27 +90,24 @@ EOF
 verify_deployment() {
     local count=0
     local max_attempts=15
-    
     (
     while [ $count -lt $max_attempts ]; do
-        # Check if container is running
         if [ "$(docker inspect -f '{{.State.Running}}' metube 2>/dev/null)" == "true" ]; then
-            echo 100
-            break
+            echo 100; break
         fi
         sleep 2
         count=$((count + 1))
         echo $(( count * 100 / max_attempts ))
     done
-    ) | whiptail --title "Deployment Progress" --gauge "Starting MeTube and verifying status..." 10 60 0
+    ) | whiptail --title "Status" --gauge "Initializing MeTube..." 10 60 0
 }
 
 # --- Samba Integration ---
 setup_samba() {
     if ! command -v smbd &> /dev/null; then return; fi
 
-    CHOICES=$(whiptail --title "Samba Configuration" --checklist \
-    "Select shares to create (Space to select):" 15 65 3 \
+    CHOICES=$(whiptail --title "Samba Setup" --checklist \
+    "Select shares to add (Space = Select, Tab = Switch to OK):" 15 65 3 \
     "DOWNLOADS" "MeTube Downloads ($HOST_DL_PATH)" ON \
     "MEDIA" "System Media Folder (/media)" OFF \
     "DOCKER" "Docker Config Folders (/docker)" OFF 3>&1 1>&2 2>&3)
@@ -157,4 +151,4 @@ verify_deployment
 setup_samba
 
 IP_ADDR=$(hostname -I | awk '{print $1}')
-whiptail --title "Installation Success" --msgbox "MeTube is ready!\n\nAccess it at: http://$IP_ADDR:$USER_PORT\nDownloads located at: $HOST_DL_PATH" 12 60
+whiptail --title "Complete" --msgbox "MeTube is live!\n\nhttp://$IP_ADDR:$USER_PORT" 12 60
